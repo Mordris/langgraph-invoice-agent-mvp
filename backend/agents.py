@@ -1,0 +1,145 @@
+import os
+import json
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, AIMessage
+from models import AgentState
+from utils import get_token_friendly_schema
+from tools import run_sql_query, semantic_search
+
+# LLM Setup
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+DB_URL = os.getenv("DATABASE_URL")
+
+# --- Node Functions ---
+
+def guardrails_node(state: AgentState):
+    """
+    Step 1: Verify if the input is safe and relevant.
+    """
+    last_msg = state['messages'][-1].content
+    
+    system_prompt = """
+    You are a firewall. Your job is to check if the user query is relevant to:
+    1. Invoices, payments, taxes, merchants.
+    2. Buying items, shopping history.
+    3. General greetings (hello, hi).
+    
+    If RELEVANT, reply 'YES'.
+    If IRRELEVANT (e.g. asking about celebrities, coding help unrelated to this app), reply 'NO'.
+    """
+    
+    response = llm.invoke([SystemMessage(content=system_prompt), state['messages'][-1]])
+    decision = response.content.strip().upper()
+    
+    if "NO" in decision:
+        return {"error": "Irrelevant query.", "next_step": "end_conversation"}
+    
+    # Initialize loop counter for the new turn
+    return {"remaining_loops": 3, "error": None}
+
+def planner_node(state: AgentState):
+    """
+    Step 2: Analyze the user's intent and choose the tool.
+    """
+    query = state['messages'][-1].content
+    schema = get_token_friendly_schema(DB_URL)
+    
+    prompt = f"""
+    You are a Planner. You have access to an Invoice Database.
+    Schema:
+    {schema}
+    
+    User Query: "{query}"
+    
+    Task: specificy the next step.
+    1. 'sql_agent': For aggregations (total, average, count), specific dates, or math.
+    2. 'vector_agent': For finding specific items ("Samsung phone"), merchant details, or vague text searches.
+    3. 'clarify': If the user query is too vague (e.g. "How much?" without saying what).
+    
+    Return JSON format: {{"reasoning": "...", "next": "sql_agent" | "vector_agent" | "clarify"}}
+    """
+    
+    try:
+        response = llm.invoke(prompt)
+        # Basic JSON parsing (in prod use structured output)
+        content = response.content.replace("```json", "").replace("```", "").strip()
+        decision = json.loads(content)
+        return {"plan": decision["reasoning"], "next_step": decision["next"]}
+    except Exception:
+        # Fallback
+        return {"plan": "Defaulting to vector search due to parse error", "next_step": "vector_agent"}
+
+def sql_agent_node(state: AgentState):
+    """
+    Step 3a: Analytics via SQL.
+    """
+    if state.get('remaining_loops', 0) <= 0:
+        return {"error": "Max execution loops reached."}
+        
+    schema = get_token_friendly_schema(DB_URL)
+    question = state['messages'][-1].content
+    
+    # Generate SQL
+    prompt = f"""
+    You are a PostgreSQL Expert.
+    Schema: {schema}
+    
+    Question: {question}
+    
+    Return ONLY a valid PostgreSQL SELECT query. Do not wrap in markdown.
+    """
+    response = llm.invoke(prompt)
+    query = response.content.replace("```sql", "").replace("```", "").strip()
+    
+    # Execute
+    result = run_sql_query(query)
+    
+    return {
+        "sql_query": query,
+        "sql_result": result,
+        "next_step": "summarize",
+        "remaining_loops": state['remaining_loops'] - 1
+    }
+
+def vector_agent_node(state: AgentState):
+    """
+    Step 3b: Semantic Search.
+    """
+    question = state['messages'][-1].content
+    result = semantic_search(question)
+    
+    return {
+        "sql_result": result, # We use the same field 'sql_result' to store data for the summarizer
+        "next_step": "summarize"
+    }
+
+def clarification_node(state: AgentState):
+    """
+    Step 3c: Ask User for info.
+    """
+    return {
+        "clarification_needed": True,
+        # The graph will interrupt here, the frontend will display this message
+        "messages": [AIMessage(content="I need more details. Could you specify the date range, merchant, or item name?")]
+    }
+
+def summarizer_node(state: AgentState):
+    """
+    Step 4: Formulate the answer.
+    """
+    context = state.get("sql_result")
+    query = state['messages'][-1].content
+    
+    prompt = f"""
+    User Question: {query}
+    Data Retrieved: {context}
+    
+    Answer the user politely and concisely based on the data. 
+    If the data says 'No results', tell the user you couldn't find that info.
+    """
+    
+    response = llm.invoke(prompt)
+    return {
+        "messages": [response],
+        "next_step": "end"
+    }
