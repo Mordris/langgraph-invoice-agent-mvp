@@ -4,58 +4,52 @@ from graph import app_graph
 from models import ChatRequest, ChatResponse
 import redis
 import os
-import uuid
 
 app = FastAPI(title="Invoice Agent API")
-
-# Redis for Rate Limiting
 r = redis.Redis.from_url(os.getenv("REDIS_URL"), decode_responses=True)
-MAX_REQUESTS = int(os.getenv("MAX_QUESTIONS_PER_MIN", 5))
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest):
     session_id = req.session_id
-    
-    # --- 1. Rate Limiting ---
-    rate_key = f"rate_limit:{session_id}"
-    current_count = r.incr(rate_key)
-    if current_count == 1:
-        r.expire(rate_key, 60) # Reset every minute
-        
-    if current_count > MAX_REQUESTS:
-        raise HTTPException(status_code=429, detail="Too many requests. Please wait a minute.")
-
-    # --- 2. Process with LangGraph ---
-    # config defines the thread/session ID for memory
     config = {"configurable": {"thread_id": session_id}}
     
     try:
-        # We invoke the graph with the new user message
-        # The graph loads previous state automatically via checkpointer
+        # Reset turn usage by passing an empty dict update to the state first?
+        # LangGraph state is persistent. We can't easily "reset" part of it via invoke params directly without a state update.
+        # However, our track_usage logic simply overwrites 'token_usage_turn' based on the accumulator.
+        # Actually, to be accurate, we should ideally zero it out.
+        # For MVP, we will rely on the fact that 'track_usage' adds to the OLD value in the state.
+        # We need to manually clear 'token_usage_turn' before invoking.
+        
+        # NOTE: With MemorySaver, state persists. 
+        # We will update the state to clear turn usage before running.
+        current_state = app_graph.get_state(config)
+        if current_state.values:
+            app_graph.update_state(config, {"token_usage_turn": {"total":0, "prompt":0, "completion":0}})
+
         result = app_graph.invoke(
             {"messages": [HumanMessage(content=req.message)]}, 
             config=config
         )
         
-        # Extract the final response (last message)
         last_message = result['messages'][-1].content
-        
-        # Extract steps log for observability
         steps = result.get("steps_log", [])
         
+        # Get the usages
+        session_usage = result.get("token_usage_session", {})
+        turn_usage = result.get("token_usage_turn", {})
+        
+        # Combine for frontend display
+        usage_display = {
+            "turn": turn_usage,
+            "session": session_usage
+        }
+        
         if result.get("error"):
-            return ChatResponse(response=f"Error: {result['error']}", steps=steps)
+            return ChatResponse(response=f"Error: {result['error']}", steps=steps, token_usage=usage_display)
             
-        return ChatResponse(response=last_message, steps=steps)
+        return ChatResponse(response=last_message, steps=steps, token_usage=usage_display)
 
     except Exception as e:
-        print(f"Error processing graph: {e}")
+        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)

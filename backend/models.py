@@ -30,8 +30,12 @@ class AgentState(TypedDict):
     clarification_needed: Optional[bool]
     error: Optional[str]
     
-    # New: Collect logs/steps to show the user
+    # Collect logs/steps to show the user
     steps_log: List[str] 
+
+    # Track accumulated token usage
+    token_usage_session: dict # Cumulative
+    token_usage_turn: dict    # Just this interaction
 
 # --- API Models ---
 class ChatRequest(BaseModel):
@@ -40,3 +44,5 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     response: str
+    steps: List[str] = []
+    token_usage: dict = {}
