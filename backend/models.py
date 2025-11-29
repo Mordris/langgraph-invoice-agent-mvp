@@ -18,6 +18,9 @@ class AgentState(TypedDict):
     
     # Planner outputs
     plan: Optional[str]
+
+    # Stores the context-aware standalone question
+    refined_query: Optional[str] 
     
     # SQL Agent outputs
     sql_query: Optional[str]
