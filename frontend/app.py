@@ -30,9 +30,10 @@ async def main(message: cl.Message):
             steps = data.get("steps", [])
             usage = data.get("token_usage", {})
             
-            # 1. Render Steps
+            # 1. Render Thinking Steps (Tokens Hidden Inside)
             if steps:
                 async with cl.Step(name="Agent Thinking") as parent:
+                    # Render Logic Steps
                     for log in steps:
                         icon = "🔧"
                         if "Planner" in log: icon = "🧠"
@@ -43,20 +44,17 @@ async def main(message: cl.Message):
                         
                         async with cl.Step(name=f"{icon} Step", parent_id=parent.id) as child:
                             child.output = log
-            
-            # 2. Append Token Usage
-            if usage:
-                turn = usage.get('turn', {})
-                sess = usage.get('session', {})
-                
-                token_info = f"""
-                
----
-**📊 Token Usage**
-*   **This Turn**: {turn.get('total', 0)}
-*   **Session Total**: {sess.get('total', 0)}
+                    
+                    # Render Token Usage as the LAST child step (Hidden inside parent)
+                    if usage:
+                        turn = usage.get('turn', {})
+                        sess = usage.get('session', {})
+                        token_text = f"""
+Turn Total: {turn.get('total', 0)} (P: {turn.get('prompt',0)}, C: {turn.get('completion',0)})
+Session Total: {sess.get('total', 0)}
 """
-                bot_answer += token_info
+                        async with cl.Step(name="📊 Token Usage", parent_id=parent.id) as usage_step:
+                            usage_step.output = token_text
 
             msg.content = bot_answer
             await msg.update()
