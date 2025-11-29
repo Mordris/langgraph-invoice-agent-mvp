@@ -37,8 +37,8 @@ async def main(message: cl.Message):
     """
     session_id = cl.user_session.get("session_id")
     
-    # Create an empty message to show we are working
-    msg = cl.Message(content="")
+    # Create a message placeholder to show work in progress
+    msg = cl.Message(content="Thinking...")
     await msg.send()
     
     # Prepare the payload
@@ -49,8 +49,7 @@ async def main(message: cl.Message):
     
     try:
         # Call Backend API
-        # Note: In a full production app, we would use StreamingResponse 
-        # but for this MVP we await the full graph execution.
+        # We use cl.make_async to run the blocking requests call
         response = await cl.make_async(requests.post)(
             CHAT_ENDPOINT, 
             json=payload, 
@@ -59,8 +58,28 @@ async def main(message: cl.Message):
         
         if response.status_code == 200:
             data = response.json()
-            # Update the message with the bot's response
-            msg.content = data.get("response", "No response.")
+            bot_answer = data.get("response", "No response.")
+            steps = data.get("steps", [])
+            
+            # 1. Visualize the Agent's Thinking Process
+            # We create a parent step to hold the logs
+            if steps:
+                async with cl.Step(name="Agent Thinking Process") as parent_step:
+                    for log in steps:
+                        # Determine icon based on log content
+                        icon = "🔧"
+                        if "Planner" in log: icon = "🧠"
+                        elif "SQL" in log: icon = "💾"
+                        elif "Vector" in log: icon = "🔍"
+                        elif "Guardrails" in log: icon = "🛡️"
+                        elif "Summarizer" in log: icon = "📝"
+                        
+                        # Add child step for each log entry
+                        async with cl.Step(name=f"{icon} Step", parent_id=parent_step.id) as child:
+                            child.output = log
+            
+            # 2. Update the message with the final response
+            msg.content = bot_answer
             await msg.update()
         else:
             # Handle API Errors

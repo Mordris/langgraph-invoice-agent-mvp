@@ -24,7 +24,7 @@ def get_token_friendly_schema(db_url: str) -> str:
     # If not in cache, generate it
     engine = create_engine(db_url)
     inspector = inspect(engine)
-    schema_lines = []
+    schema_lines: list[str] = []
 
     # Filter only relevant tables (exclude vector migrations or system tables if any)
     allowed_tables = {'merchants', 'invoices', 'invoice_items'}
@@ -33,7 +33,7 @@ def get_token_friendly_schema(db_url: str) -> str:
         if table_name not in allowed_tables:
             continue
             
-        columns = []
+        columns: list[str] = []
         for col in inspector.get_columns(table_name):
             # Format: "name:type" (e.g., "total_amount:NUMERIC")
             # We strip complex type details to save tokens

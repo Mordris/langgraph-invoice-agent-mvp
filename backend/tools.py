@@ -1,25 +1,27 @@
 import os
+import logging
 from sqlalchemy import create_engine, text
 from langchain_openai import OpenAIEmbeddings
-import numpy as np
 
-# Database Connection
+# Configure Logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 DB_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DB_URL)
 
-# Embeddings Model (Must match ingestion model)
 embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
 def run_sql_query(query: str) -> str:
     """
     Executes a read-only SQL query against the database.
     """
-    # Basic safety check (In prod, use a read-only DB user)
     if not query.strip().lower().startswith("select"):
-        raise ValueError("Only SELECT queries are allowed.")
+        return "Error: Only SELECT queries are allowed."
 
     try:
         with engine.connect() as connection:
+            logger.info(f"Executing SQL: {query}")
             result = connection.execute(text(query))
             keys = result.keys()
             rows = result.fetchall()
@@ -27,48 +29,54 @@ def run_sql_query(query: str) -> str:
             if not rows:
                 return "No results found."
             
-            # Format as a string representation of a list of dicts
+            # Format as string
             result_str = [dict(zip(keys, row)) for row in rows]
             return str(result_str)
             
     except Exception as e:
+        logger.error(f"SQL Error: {e}")
         return f"SQL Error: {str(e)}"
 
 def semantic_search(query: str, limit: int = 5) -> str:
     """
-    Embeds the query and searches invoices and items using pgvector.
-    Returns the most relevant text chunks.
+    Embeds the query and searches invoices and items.
+    CRITICAL FIX: Joins with merchants table to provide context (Who sold it?).
     """
     try:
         query_emb = embeddings_model.embed_query(query)
         
-        # We search both tables and combine results
-        # Using the <=> operator for Cosine Distance
+        # We perform two separate searches (Invoices & Items) and union them.
+        # This is often cleaner/faster than a complex CTE for heterogenous data.
         
         sql = text("""
-        WITH combined_search AS (
-            -- Search Invoices
+        WITH search_results AS (
+            -- 1. Search Invoice Summaries
             SELECT 
                 'Invoice' as type,
-                invoice_number as id,
-                raw_xml as content,
-                embedding <=> :emb as distance
-            FROM invoices
-            WHERE (embedding <=> :emb) < 0.5 -- Threshold
+                i.invoice_number as id,
+                -- We include Merchant Name in the result content
+                'Invoice ' || i.invoice_number || ' from ' || m.name || ' on ' || i.date || '. Total: $' || i.total_amount as content,
+                i.embedding <=> :emb as distance
+            FROM invoices i
+            JOIN merchants m ON i.merchant_id = m.id
+            WHERE (i.embedding <=> :emb) < 0.6
             
             UNION ALL
             
-            -- Search Items
+            -- 2. Search Specific Items
             SELECT 
                 'Item' as type,
-                description as id,
-                description || ' (Price: ' || unit_price || ')' as content,
-                embedding <=> :emb as distance
-            FROM invoice_items
-            WHERE (embedding <=> :emb) < 0.5
+                ii.description as id,
+                -- CRITICAL FIX: Include Merchant Name here!
+                ii.description || ' bought from ' || m.name || ' for $' || ii.unit_price as content,
+                ii.embedding <=> :emb as distance
+            FROM invoice_items ii
+            JOIN invoices i ON ii.invoice_id = i.id
+            JOIN merchants m ON i.merchant_id = m.id
+            WHERE (ii.embedding <=> :emb) < 0.6
         )
-        SELECT type, content 
-        FROM combined_search
+        SELECT type, content, distance
+        FROM search_results
         ORDER BY distance ASC
         LIMIT :limit;
         """)
@@ -77,10 +85,13 @@ def semantic_search(query: str, limit: int = 5) -> str:
             results = connection.execute(sql, {"emb": str(query_emb), "limit": limit}).fetchall()
             
         if not results:
-            return "No relevant invoices or items found in the semantic search."
+            return "No relevant invoices or items found."
             
-        formatted = "\n".join([f"[{r[0]}] {r[1]}" for r in results])
+        # Format the context for the LLM
+        formatted = "\n".join([f"- {r[1]}" for r in results])
+        logger.info(f"Vector Search found {len(results)} matches.")
         return formatted
 
     except Exception as e:
+        logger.error(f"Vector Error: {e}")
         return f"Vector Search Error: {str(e)}"

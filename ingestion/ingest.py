@@ -181,7 +181,7 @@ def process_invoices(cur):
         selected_items = random.choices(products, k=random.randint(1, 4))
         
         items_data = []
-        running_total = 0
+        running_total = 0.0
         for p_name, p_price in selected_items:
             qty = random.randint(1, 3)
             l_tot = p_price * qty
@@ -207,7 +207,7 @@ def process_invoices(cur):
         
         # 4. Store in DB
         # Merchant
-        m_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, parsed['merchant_name']))
+        m_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(parsed['merchant_name'])))
         cur.execute(
             "INSERT INTO merchants (id, name, address) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
             (m_id, parsed['merchant_name'], parsed['merchant_address'])
@@ -215,6 +215,12 @@ def process_invoices(cur):
 
         # Invoice
         inv_id = str(uuid.uuid4())
+        
+        # Debug/Fix for float error
+        if not isinstance(parsed['items'], list):
+            print(f"WARNING: parsed['items'] is not a list, it is {type(parsed['items'])}. Value: {parsed['items']}")
+            parsed['items'] = []
+
         items_str = ", ".join([f"{i['quantity']}x {i['description']}" for i in parsed['items']])
         summary = f"Invoice {parsed['invoice_number']} from {parsed['merchant_name']}. Date: {parsed['date']}. Total: ${parsed['total_amount']}. Items: {items_str}."
         inv_emb = embeddings_model.embed_query(summary)
@@ -248,7 +254,8 @@ if __name__ == "__main__":
         cur = conn.cursor()
         setup_schema(cur)
         cur.execute("SELECT COUNT(*) FROM invoices")
-        if cur.fetchone()[0] == 0:
+        result = cur.fetchone()
+        if result and result[0] == 0:
             process_invoices(cur)
         else:
             print("Data exists.")

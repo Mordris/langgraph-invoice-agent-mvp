@@ -26,6 +26,9 @@ class AgentState(TypedDict):
     # Flags & Errors
     clarification_needed: Optional[bool]
     error: Optional[str]
+    
+    # New: Collect logs/steps to show the user
+    steps_log: List[str] 
 
 # --- API Models ---
 class ChatRequest(BaseModel):

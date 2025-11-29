@@ -42,13 +42,15 @@ async def chat_endpoint(req: ChatRequest):
         )
         
         # Extract the final response (last message)
-        # Note: If graph ended at 'guardrails' with error, we handle that.
+        last_message = result['messages'][-1].content
+        
+        # Extract steps log for observability
+        steps = result.get("steps_log", [])
         
         if result.get("error"):
-            return ChatResponse(response=f"Error: {result['error']}")
+            return ChatResponse(response=f"Error: {result['error']}", steps=steps)
             
-        last_message = result['messages'][-1]
-        return ChatResponse(response=last_message.content)
+        return ChatResponse(response=last_message, steps=steps)
 
     except Exception as e:
         print(f"Error processing graph: {e}")
