@@ -68,11 +68,29 @@ def guardrails_node(state: AgentState):
 
 def intent_node(state: AgentState):
     """
-    Classifies the user intent. 
-    Crucial Fix: Distinguish between 'SQL' (structured/time) and 'Vector' (unstructured).
+    Classifies the user intent with pattern detection for IDs.
     """
     history_view = get_truncated_history(state['messages'][-3:])
     user_input = state['messages'][-1].content
+    
+    # Pre-check: If input contains invoice patterns, force analytics
+    import re
+    invoice_patterns = [
+        r'INV-\d+',           # INV-12345
+        r'invoice\s+\w{8,}',  # invoice followed by 8+ chars (UUID fragments)
+        r'[0-9a-f]{8}-[0-9a-f]{4}',  # UUID patterns
+    ]
+    
+    for pattern in invoice_patterns:
+        if re.search(pattern, user_input, re.IGNORECASE):
+            sess_usage = state.get('token_usage_session', {'total': 0, 'prompt': 0, 'completion': 0})
+            turn_usage = state.get('token_usage_turn', {'total': 0, 'prompt': 0, 'completion': 0})
+            return {
+                "intent": "analytics",
+                "steps_log": log_step(state, f"🧭 Intent: Detected 'analytics' (invoice ID pattern)"),
+                "token_usage_session": sess_usage,
+                "token_usage_turn": turn_usage
+            }
     
     prompt = f"""
     You are an Intent Classifier.
@@ -91,14 +109,19 @@ def intent_node(state: AgentState):
        - Questions about DATES ("Latest", "Last", "First", "2025").
        - Lists of items ("Show me invoices", "List purchases").
        - Spending checks ("How much did I spend").
+       - **Lookups by ID/Invoice Number** ("Show me invoice INV-37681", "invoice 6423b841...").
+       - **References to previous results** ("What items were in this?", "all the details in this invoice").
        
     3. SEARCH (Vector): 
-       - Looking for specific text descriptions.
-       - "Find the invoice with the coffee machine description".
-       - (Note: "Where did I buy X" is usually ANALYTICS/SQL because it involves Merchant Names).
+       - Looking for text descriptions WITHOUT specific IDs.
+       - "Find invoices mentioning coffee machine".
+       - "Show me purchases with electronics".
+       - (NEVER use for invoice numbers or "this/that" references).
        
     4. CLARIFY: 
-       - Single words ("It", "Them") with NO history context.
+       - Single words ("It", "Them") with NO context.
+    
+    **CRITICAL**: Invoice numbers (INV-XXXXX), UUIDs, "this/that invoice" → ALWAYS 'analytics'.
     
     Return JSON: {{"intent": "general" | "analytics" | "search" | "clarify"}}
     """
@@ -115,10 +138,12 @@ def intent_node(state: AgentState):
             "steps_log": log_step(state, f"🧭 Intent: Detected '{intent}'"),
             "token_usage_session": sess_usage, "token_usage_turn": turn_usage
         }
-    except:
+    except Exception as e:
+        sess_usage = state.get('token_usage_session', {'total': 0, 'prompt': 0, 'completion': 0})
+        turn_usage = state.get('token_usage_turn', {'total': 0, 'prompt': 0, 'completion': 0})
         return {
             "intent": "general",
-            "steps_log": log_step(state, "🧭 Intent: Error, defaulting to General."),
+            "steps_log": log_step(state, f"🧭 Intent: Error ({e}), defaulting to General."),
             "token_usage_session": sess_usage, "token_usage_turn": turn_usage
         }
 
