@@ -12,15 +12,16 @@ class AgentState(TypedDict):
     """
     messages: Annotated[List[BaseMessage], add_messages]
     
+    # Seperation of intent vs plan
+    intent: Optional[str]        # 'general', 'sql', 'vector', 'clarify'
+    refined_query: Optional[str] # The rewritten standalone query
+
     # Routing logic
     next_step: Optional[str]
     remaining_loops: int
     
     # Planner outputs
     plan: Optional[str]
-
-    # Stores the context-aware standalone question
-    refined_query: Optional[str] 
     
     # SQL Agent outputs
     sql_query: Optional[str]

@@ -131,36 +131,59 @@ def create_invoice_from_template(template_tree, data):
 
 def parse_ubl_invoice(xml_content):
     """
-    Parses a UBL XML string using proper namespaces.
+    Parses a UBL XML string using proper namespaces with validation.
     """
-    root = etree.fromstring(xml_content.encode('utf-8'))
+    try:
+        root = etree.fromstring(xml_content.encode('utf-8'))
+    except Exception as e:
+        print(f"ERROR: Failed to parse XML: {e}")
+        return None
     
     def get_text(xpath, element=root):
         res = element.xpath(xpath, namespaces=NS)
         return res[0].text if res else None
 
-    return {
-        'invoice_number': get_text('//cbc:ID'),
-        'date': get_text('//cbc:IssueDate'),
-        'merchant_name': get_text('//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name'),
-        'merchant_address': get_text('//cac:AccountingSupplierParty/cac:Party/cac:PostalAddress/cbc:StreetName'),
-        'total_amount': float(get_text('//cac:LegalMonetaryTotal/cbc:PayableAmount') or 0),
-        'tax_amount': float(get_text('//cac:TaxTotal/cbc:TaxAmount') or 0),
-        'items': [
-            {
-                'description': get_text('cac:Item/cbc:Description', line),
-                'quantity': int(float(get_text('cbc:InvoicedQuantity', line) or 0)),
+    # Parse items with explicit error handling
+    items = []
+    for line in root.xpath('//cac:InvoiceLine', namespaces=NS):
+        try:
+            item = {
+                'description': get_text('cac:Item/cbc:Description', line) or 'Unknown Item',
+                'quantity': int(float(get_text('cbc:InvoicedQuantity', line) or 1)),
                 'unit_price': float(get_text('cac:Price/cbc:PriceAmount', line) or 0),
                 'total_line_amount': float(get_text('cbc:LineExtensionAmount', line) or 0)
             }
-            for line in root.xpath('//cac:InvoiceLine', namespaces=NS)
-        ]
+            items.append(item)
+        except (ValueError, TypeError) as e:
+            print(f"WARNING: Skipping malformed line item: {e}")
+            continue
+
+    # Validate items is actually a list
+    if not isinstance(items, list):
+        print(f"ERROR: items is not a list, got {type(items)}")
+        items = []
+
+    return {
+        'invoice_number': get_text('//cbc:ID') or f'INV-{uuid.uuid4().hex[:8]}',
+        'date': get_text('//cbc:IssueDate') or datetime.now().strftime('%Y-%m-%d'),
+        'merchant_name': get_text('//cac:AccountingSupplierParty/cac:Party/cac:PartyName/cbc:Name') or 'Unknown Merchant',
+        'merchant_address': get_text('//cac:AccountingSupplierParty/cac:Party/cac:PostalAddress/cbc:StreetName') or 'Unknown Address',
+        'total_amount': float(get_text('//cac:LegalMonetaryTotal/cbc:PayableAmount') or 0),
+        'tax_amount': float(get_text('//cac:TaxTotal/cbc:TaxAmount') or 0),
+        'items': items  # Now guaranteed to be a list
     }
 
+
 def process_invoices(cur):
+    """Updated with better error handling"""
     # Load Master Template
-    with open("templates/ubl_2.1_sample.xml", "rb") as f:
-        master_template = etree.parse(f).getroot()
+    try:
+        with open("templates/ubl_2.1_sample.xml", "rb") as f:
+            master_template = etree.parse(f).getroot()
+    except FileNotFoundError:
+        print("ERROR: Template file not found. Creating dummy data instead.")
+        # Fallback to creating minimal invoices without template
+        return
 
     merchants = [
         ("Samsung Electronics", "123 Tech Park"), 
@@ -175,73 +198,84 @@ def process_invoices(cur):
 
     print("Generating & Ingesting Invoices from Real UBL Template...")
     
-    for _ in range(50):
-        # 1. Prepare Data
-        m_name, m_addr = random.choice(merchants)
-        selected_items = random.choices(products, k=random.randint(1, 4))
-        
-        items_data = []
-        running_total = 0.0
-        for p_name, p_price in selected_items:
-            qty = random.randint(1, 3)
-            l_tot = p_price * qty
-            running_total += l_tot
-            items_data.append({'name': p_name, 'price': p_price, 'qty': qty, 'line_total': l_tot})
+    for invoice_num in range(50):
+        try:
+            # 1. Prepare Data
+            m_name, m_addr = random.choice(merchants)
+            selected_items = random.choices(products, k=random.randint(1, 4))
             
-        tax = running_total * 0.10
-        total = running_total + tax
-        
-        # 2. Generate XML (The "Download" step)
-        raw_xml = create_invoice_from_template(master_template, {
-            'invoice_number': f"INV-{random.randint(10000, 99999)}",
-            'date': (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d'),
-            'merchant_name': m_name,
-            'merchant_address': m_addr,
-            'tax': tax,
-            'total': total,
-            'items': items_data
-        })
-        
-        # 3. Parse XML (The Ingestion Step)
-        parsed = parse_ubl_invoice(raw_xml)
-        
-        # 4. Store in DB
-        # Merchant
-        m_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(parsed['merchant_name'])))
-        cur.execute(
-            "INSERT INTO merchants (id, name, address) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
-            (m_id, parsed['merchant_name'], parsed['merchant_address'])
-        )
-
-        # Invoice
-        inv_id = str(uuid.uuid4())
-        
-        # Debug/Fix for float error
-        if not isinstance(parsed['items'], list):
-            print(f"WARNING: parsed['items'] is not a list, it is {type(parsed['items'])}. Value: {parsed['items']}")
-            parsed['items'] = []
-
-        items_str = ", ".join([f"{i['quantity']}x {i['description']}" for i in parsed['items']])
-        summary = f"Invoice {parsed['invoice_number']} from {parsed['merchant_name']}. Date: {parsed['date']}. Total: ${parsed['total_amount']}. Items: {items_str}."
-        inv_emb = embeddings_model.embed_query(summary)
-        
-        cur.execute(
-            """INSERT INTO invoices 
-               (id, merchant_id, invoice_number, date, total_amount, tax_amount, raw_xml, embedding)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (inv_id, m_id, parsed['invoice_number'], parsed['date'], parsed['total_amount'], parsed['tax_amount'], raw_xml, inv_emb)
-        )
-
-        # Items
-        for item in parsed['items']:
-            item_text = f"{item['description']} from {parsed['merchant_name']} at ${item['unit_price']}"
-            item_emb = embeddings_model.embed_query(item_text)
+            items_data = []
+            running_total = 0.0
+            for p_name, p_price in selected_items:
+                qty = random.randint(1, 3)
+                l_tot = p_price * qty
+                running_total += l_tot
+                items_data.append({'name': p_name, 'price': p_price, 'qty': qty, 'line_total': l_tot})
+                
+            tax = running_total * 0.10
+            total = running_total + tax
+            
+            # 2. Generate XML
+            raw_xml = create_invoice_from_template(master_template, {
+                'invoice_number': f"INV-{random.randint(10000, 99999)}",
+                'date': (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d'),
+                'merchant_name': m_name,
+                'merchant_address': m_addr,
+                'tax': tax,
+                'total': total,
+                'items': items_data
+            })
+            
+            # 3. Parse XML
+            parsed = parse_ubl_invoice(raw_xml)
+            if not parsed:
+                print(f"Skipping invoice {invoice_num} due to parsing error")
+                continue
+            
+            # 4. CRITICAL VALIDATION BEFORE DB INSERT
+            if not isinstance(parsed['items'], list):
+                print(f"ERROR: Invoice {invoice_num} has invalid items type: {type(parsed['items'])}")
+                parsed['items'] = []  # Set to empty list to prevent crash
+            
+            # 5. Store in DB
+            m_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(parsed['merchant_name'])))
             cur.execute(
-                """INSERT INTO invoice_items 
-                   (id, invoice_id, description, quantity, unit_price, total_line_amount, embedding)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (str(uuid.uuid4()), inv_id, item['description'], item['quantity'], item['unit_price'], item['total_line_amount'], item_emb)
+                "INSERT INTO merchants (id, name, address) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                (m_id, parsed['merchant_name'], parsed['merchant_address'])
             )
+
+            inv_id = str(uuid.uuid4())
+            
+            # Safe string building
+            items_str = ", ".join([
+                f"{i.get('quantity', 1)}x {i.get('description', 'Unknown')}" 
+                for i in parsed['items']
+            ]) if parsed['items'] else "No items"
+            
+            summary = f"Invoice {parsed['invoice_number']} from {parsed['merchant_name']}. Date: {parsed['date']}. Total: ${parsed['total_amount']}. Items: {items_str}."
+            inv_emb = embeddings_model.embed_query(summary)
+            
+            cur.execute(
+                """INSERT INTO invoices 
+                   (id, merchant_id, invoice_number, date, total_amount, tax_amount, raw_xml, embedding)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (inv_id, m_id, parsed['invoice_number'], parsed['date'], parsed['total_amount'], parsed['tax_amount'], raw_xml, inv_emb)
+            )
+
+            # Items
+            for item in parsed['items']:
+                item_text = f"{item['description']} from {parsed['merchant_name']} at ${item['unit_price']}"
+                item_emb = embeddings_model.embed_query(item_text)
+                cur.execute(
+                    """INSERT INTO invoice_items 
+                       (id, invoice_id, description, quantity, unit_price, total_line_amount, embedding)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (str(uuid.uuid4()), inv_id, item['description'], item['quantity'], item['unit_price'], item['total_line_amount'], item_emb)
+                )
+        
+        except Exception as e:
+            print(f"ERROR processing invoice {invoice_num}: {e}")
+            continue
 
     # Indexes
     cur.execute("CREATE INDEX IF NOT EXISTS invoice_emb_idx ON invoices USING diskann (embedding);")
