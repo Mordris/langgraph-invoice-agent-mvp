@@ -167,8 +167,8 @@ def refiner_node(state: AgentState):
     Task: Rewrite the last message into a precise standalone query.
     
     Rules:
-    1. Resolve "It", "That", "Last purchase" using History.
-    2. If finding a Merchant/Item: Always use broad terms (e.g., "Amazon" -> "Amazon").
+    1. Resolve "It", "That", "Last purchase", etc. using History.
+    2. If finding a Merchant/Item: If only the name is given, use broad terms (e.g., "Amazon" -> "Amazon").
     3. If Date missing -> ASSUME ALL TIME.
     
     Return JSON: {{"refined_query": "..."}}
@@ -224,6 +224,7 @@ def sql_agent_node(state: AgentState):
     
     4. Join `merchants` for merchant names/addresses.
     5. NO placeholders or fake data.
+    6. Return as many fields as possible if not specified.
     
     EXAMPLES:
     - "How many Amazon purchases?" 
